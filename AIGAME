@@ -1,1 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>双人弹性物理俄罗斯方块 - 明亮版</title>
+    <style>
+        :root {
+            --p1-color: #007bff;
+            --p2-color: #dc3545;
+            --bg-color: #f0f2f5;
+            --panel-bg: #ffffff;
+            --text-main: #333;
+        }
 
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        h1 { 
+            font-size: 28px; 
+            margin: 15px 0; 
+            color: #444;
+            letter-spacing: 2px;
+        }
+
+        #game-container { 
+            display: flex; 
+            gap: 30px; 
+            align-items: center; 
+        }
+
+        .panel {
+            background-color: var(--panel-bg);
+            padding: 25px;
+            border-radius: 15px;
+            width: 150px;
+            text-align: center;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.05);
+            border: 3px solid transparent;
+            transition: all 0.3s ease;
+        }
+
+        .active-p1 { border-color: var(--p1-color); transform: translateY(-5px); box-shadow: 0 15px 30px rgba(0,123,255,0.2); }
+        .active-p2 { border-color: var(--p2-color); transform: translateY(-5px); box-shadow: 0 15px 30px rgba(220,53,69,0.2); }
+
+        .score-label { font-size: 14px; color: #888; margin-bottom: 5px; }
+        .score { font-size: 36px; font-weight: 800; margin-bottom: 10px; }
+
+        .controls-hint { font-size: 12px; color: #aaa; line-height: 1.5; }
+
+        canvas {
+            background-color: #ffffff;
+            border: 8px solid #fff;
+            border-radius: 12px;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.1);
+        }
+
+        #overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255, 255, 255, 0.9);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+            border-radius: 4px;
+        }
+
+        #overlay h2 { color: #333; margin-bottom: 10px; }
+        #overlay p { color: #666; text-align: center; }
+
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <h1>双人弹性物理俄罗斯方块</h1>
+
+    <div id="game-container">
+        <div id="p1-panel" class="panel">
+            <div class="score-label">玩家 1</div>
+            <div class="score" id="score-1" style="color: var(--p1-color);">0</div>
+            <div class="controls-hint">操作: W A S D<br>(W旋转)</div>
+        </div>
+
+        <div style="position: relative;">
+            <canvas id="gameCanvas" width="320" height="560"></canvas>
+            <div id="overlay">
+                <h2 id="overlay-title">准备好了吗？</h2>
+                <p id="overlay-desc">按下 <b>空格键</b> 开始游戏</p>
+            </div>
+        </div>
+
+        <div id="p2-panel" class="panel">
+            <div class="score-label">玩家 2</div>
+            <div class="score" id="score-2" style="color: var(--p2-color);">0</div>
+            <div class="controls-hint">操作: I J K L<br>(I旋转)</div>
+        </div>
+    </div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // --- 核心配置 ---
+    let gameState = 'start'; 
+    let scores = [0, 0];
+    let currentTurn = 0; // 0:P1, 1:P2
+    let particles = [];
+    let constraints = [];
+    let activeParticles = [];
+    let settleCounter = 0;
+
+    const gravity = 0.25;
+    const friction = 0.98;
+    const bounce = 0.2;
+    const radius = 12;
+    const warningLineY = 100;
+
+    const shapes = [
+        [[0,0], [1,0], [2,0], [3,0]], // I
+        [[0,0], [1,0], [0,1], [1,1]], // O
+        [[1,0], [0,1], [1,1], [2,1]], // T
+        [[0,0], [0,1], [1,1], [2,1]], // J
+        [[2,0], [0,1], [1,1], [2,1]], // L
+        [[1,0], [2,0], [0,1], [1,1]], // S
+        [[0,0], [1,0], [1,1], [2,1]]  // Z
+    ];
+
+    const keys = {};
+    window.addEventListener('keydown', e => {
+        keys[e.code] = true;
+        if (e.code === 'Space') {
+            if (gameState === 'start' || gameState === 'gameover') resetGame();
+        }
+    });
+    window.addEventListener('keyup', e => keys[e.code] = false);
+
+    function resetGame() {
+        scores = [0, 0];
+        particles = [];
+        constraints = [];
+        activeParticles = [];
+        currentTurn = 0;
+        gameState = 'playing';
+        document.getElementById('overlay').classList.add('hidden');
+        spawnPiece();
+        updateUI();
+    }
+
+    function spawnPiece() {
+        const shape = shapes[Math.floor(Math.random() * shapes.length)];
+        const color = currentTurn === 0 ? '#007bff' : '#dc3545';
+        const startX = canvas.width / 2 - 20;
+        const startY = 30;
+        
+        const newGroup = [];
+        shape.forEach(pos => {
+            const p = {
+                x: startX + pos[0] * radius * 2.1,
+                y: startY + pos[1] * radius * 2.1,
+                oldX: startX + pos[0] * radius * 2.1,
+                oldY: startY + pos[1] * radius * 2.1,
+                r: radius,
+                color: color,
+                owner: currentTurn // 记录该粒子属于哪个玩家
+            };
+            particles.push(p);
+            newGroup.push(p);
+        });
+
+        // 内部弹性骨架
+        for (let i = 0; i < newGroup.length; i++) {
+            for (let j = i + 1; j < newGroup.length; j++) {
+                const dx = newGroup[i].x - newGroup[j].x;
+                const dy = newGroup[i].y - newGroup[j].y;
+                constraints.push({
+                    p1: newGroup[i], p2: newGroup[j],
+                    len: Math.sqrt(dx*dx + dy*dy),
+                    stiffness: 0.9
+                });
+            }
+        }
+        activeParticles = newGroup;
+        settleCounter = 0;
+    }
+
+    function update() {
+        if (gameState !== 'playing') return;
+
+        // 1. 玩家输入控制
+        const moveS = 1.8;
+        const rotS = 0.08;
+        if (currentTurn === 0) {
+            if (keys['KeyA']) activeParticles.forEach(p => p.x -= moveS);
+            if (keys['KeyD']) activeParticles.forEach(p => p.x += moveS);
+            if (keys['KeyS']) activeParticles.forEach(p => p.y += moveS * 1.5);
+            if (keys['KeyW']) rotateActive(rotS);
+        } else {
+            if (keys['KeyJ']) activeParticles.forEach(p => p.x -= moveS);
+            if (keys['KeyL']) activeParticles.forEach(p => p.x += moveS);
+            if (keys['KeyK']) activeParticles.forEach(p => p.y += moveS * 1.5);
+            if (keys['KeyI']) rotateActive(rotS);
+        }
+
+        // 2. 物理核心循环 (Verlet Integration)
+        particles.forEach(p => {
+            const vx = (p.x - p.oldX) * friction;
+            const vy = (p.y - p.oldY) * friction;
+            p.oldX = p.x;
+            p.oldY = p.y;
+            p.x += vx;
+            p.y += vy + gravity;
+        });
+
+        // 约束迭代 (增强硬度)
+        for (let n = 0; n < 8; n++) {
+            constraints.forEach(c => {
+                const dx = c.p2.x - c.p1.x;
+                const dy = c.p2.y - c.p1.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                const diff = (c.len - dist) / dist * c.stiffness;
+                const ox = dx * 0.5 * diff;
+                const oy = dy * 0.5 * diff;
+                c.p1.x -= ox; c.p1.y -= oy;
+                c.p2.x += ox; c.p2.y += oy;
+            });
+
+            // 边界与粒子间碰撞
+            particles.forEach(p => {
+                if (p.y > canvas.height - p.r) {
+                    p.y = canvas.height - p.r;
+                    p.oldY = p.y + (p.y - p.oldY) * bounce;
+                }
+                if (p.x < p.r) p.x = p.r;
+                if (p.x > canvas.width - p.r) p.x = canvas.width - p.r;
+
+                particles.forEach(p2 => {
+                    if (p === p2) return;
+                    const dx = p2.x - p.x;
+                    const dy = p2.y - p.y;
+                    const distSq = dx*dx + dy*dy;
+                    const min = p.r + p2.r;
+                    if (distSq < min * min) {
+                        const dist = Math.sqrt(distSq);
+                        const push = (min - dist) * 0.5;
+                        const nx = dx / dist;
+                        const ny = dy / dist;
+                        p.x -= nx * push; p.y -= ny * push;
+                        p2.x += nx * push; p2.y += ny * push;
+                    }
+                });
+            });
+        }
+
+        // 3. 回合切换与消除判定
+        if (activeParticles.length > 0) {
+            let moving = false;
+            activeParticles.forEach(p => {
+                if (Math.abs(p.y - p.oldY) > 0.15) moving = true;
+            });
+
+            if (!moving) settleCounter++;
+            else settleCounter = 0;
+
+            if (settleCounter > 50) {
+                checkElimination();
+                
+                const isOverflow = particles.some(p => p.y < warningLineY && Math.abs(p.y - p.oldY) < 0.1);
+                
+                if (isOverflow) {
+                    gameOver();
+                } else {
+                    currentTurn = 1 - currentTurn;
+                    activeParticles = [];
+                    updateUI();
+                    spawnPiece();
+                }
+            }
+        }
+    }
+
+    function rotateActive(ang) {
+        let cx = 0, cy = 0;
+        activeParticles.forEach(p => { cx += p.x; cy += p.y; });
+        cx /= activeParticles.length; cy /= activeParticles.length;
+        activeParticles.forEach(p => {
+            const dx = p.x - cx;
+            const dy = p.y - cy;
+            p.x = cx + dx * Math.cos(ang) - dy * Math.sin(ang);
+            p.y = cy + dx * Math.sin(ang) + dy * Math.cos(ang);
+        });
+    }
+
+    // 关键改动：区分玩家所有权的消除逻辑
+    function checkElimination() {
+        const rowH = radius * 2.2;
+        const threshold = (canvas.width / (radius * 2)) * 0.8; // 80% 填充阈值
+        
+        // 自底向上检查每一行
+        for (let y = canvas.height - rowH; y > warningLineY; y -= rowH) {
+            // 获取该行范围内的所有粒子
+            const rowParticles = particles.filter(p => p.y > y && p.y < y + rowH);
+            
+            // 分别筛选出属于玩家1和玩家2的粒子
+            const p1Particles = rowParticles.filter(p => p.owner === 0);
+            const p2Particles = rowParticles.filter(p => p.owner === 1);
+
+            // 检查玩家1是否达到消除阈值
+            if (p1Particles.length >= threshold) {
+                eliminateGroup(p1Particles, 0);
+            }
+            // 检查玩家2是否达到消除阈值
+            if (p2Particles.length >= threshold) {
+                eliminateGroup(p2Particles, 1);
+            }
+        }
+    }
+
+    function eliminateGroup(group, ownerIdx) {
+        scores[ownerIdx] += group.length * 20;
+        // 移除粒子
+        particles = particles.filter(p => !group.includes(p));
+        // 移除相关约束
+        constraints = constraints.filter(c => !group.includes(c.p1) && !group.includes(c.p2));
+        updateUI();
+    }
+
+    function updateUI() {
+        document.getElementById('score-1').innerText = scores[0];
+        document.getElementById('score-2').innerText = scores[1];
+        document.getElementById('p1-panel').className = 'panel' + (currentTurn === 0 ? ' active-p1' : '');
+        document.getElementById('p2-panel').className = 'panel' + (currentTurn === 1 ? ' active-p2' : '');
+    }
+
+    function gameOver() {
+        gameState = 'gameover';
+        const overlay = document.getElementById('overlay');
+        const title = document.getElementById('overlay-title');
+        const desc = document.getElementById('overlay-desc');
+        overlay.classList.remove('hidden');
+        title.innerText = "挑战结束！";
+        const winner = scores[0] > scores[1] ? "玩家 1 获胜！" : (scores[1] > scores[0] ? "玩家 2 获胜！" : "平分秋色！");
+        desc.innerHTML = `最终得分<br><span style="color:#007bff">P1: ${scores[0]}</span> | <span style="color:#dc3545">P2: ${scores[1]}</span><br><br><b style="font-size:1.2em">${winner}</b><br><br>按下空格重启`;
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // 背景微弱网格
+        ctx.beginPath();
+        ctx.strokeStyle = '#f0f0f0';
+        ctx.lineWidth = 1;
+        for(let x=0; x<canvas.width; x+=20) { ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); }
+        for(let y=0; y<canvas.height; y+=20) { ctx.moveTo(0,y); ctx.lineTo(canvas.width,y); }
+        ctx.stroke();
+
+        // 绘制警戒线
+        ctx.beginPath();
+        ctx.setLineDash([5, 5]);
+        ctx.moveTo(0, warningLineY);
+        ctx.lineTo(canvas.width, warningLineY);
+        ctx.strokeStyle = "rgba(220, 53, 69, 0.3)";
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // 绘制约束骨架（让玩家看到连接感）
+        ctx.beginPath();
+        ctx.strokeStyle = "rgba(0,0,0,0.03)";
+        constraints.forEach(c => {
+            ctx.moveTo(c.p1.x, c.p1.y);
+            ctx.lineTo(c.p2.x, c.p2.y);
+        });
+        ctx.stroke();
+
+        // 绘制粒子
+        particles.forEach(p => {
+            // 绘制阴影效果
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = 'rgba(0,0,0,0.1)';
+            ctx.shadowOffsetY = 4;
+
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.r - 1, 0, Math.PI * 2);
+            ctx.fillStyle = p.color;
+            ctx.fill();
+
+            // 活动状态高亮
+            if (activeParticles.includes(p)) {
+                ctx.strokeStyle = "rgba(255,255,255,0.8)";
+                ctx.lineWidth = 3;
+                ctx.stroke();
+            }
+
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetY = 0;
+        });
+
+        requestAnimationFrame(() => {
+            update();
+            draw();
+        });
+    }
+
+    draw();
+</script>
+</body>
+</html>
